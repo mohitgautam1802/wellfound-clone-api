@@ -1,0 +1,413 @@
+// Wellfound clone - candidate portal data model.
+//
+// Target datasource is SQLite so the project runs with zero infrastructure.
+// Two SQLite limitations shape this schema:
+//   1. Prisma `enum` blocks are not supported -> status/type columns are `String`,
+//      constrained by the union types in `src/common/constants/domain.ts` and
+//      validated at the edge by class-validator DTOs.
+//   2. Scalar lists (`String[]`) are not supported -> anything multi-valued that we
+//      need to filter on becomes a real relation table (JobLocation, JobSkill, ...).
+//      Free-form blobs we never query into are stored as JSON `String` columns.
+//
+// Switching to Postgres later is a `provider` change plus converting the JSON
+// string columns to native `Json` - no application-layer rewrite required.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  avatarUrl    String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  profile       Profile?
+  applications  Application[]
+  savedJobs     SavedJob[]
+  hiddenJobs    HiddenJob[]
+  savedSearches SavedSearch[]
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Candidate profile
+// ---------------------------------------------------------------------------
+
+model Profile {
+  id       String @id @default(cuid())
+  userId   String @unique
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  headline    String?
+  bio         String?
+  location    String?
+  phone       String?
+  websiteUrl  String?
+  githubUrl   String?
+  linkedinUrl String?
+  twitterUrl  String?
+
+  /// Mirrors Wellfound's "Primary Role" field, e.g. "Product Manager".
+  primaryRole String?
+  /// "Open to the following roles" - JSON string array of role titles.
+  openToRoles String @default("[]")
+  /// Free-text achievements block shown on the profile overview.
+  achievements String?
+
+  // Stored as a file name only - the clone has no object storage by design.
+  resumeFileName String?
+
+  yearsOfExperience Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  experiences WorkExperience[]
+  educations  Education[]
+  skills      ProfileSkill[]
+  preference  JobPreference?
+  culture     CultureProfile?
+
+  @@map("profiles")
+}
+
+model WorkExperience {
+  id        String  @id @default(cuid())
+  profileId String
+  profile   Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  company     String
+  title       String
+  location    String?
+  description String?
+  startDate   DateTime
+  endDate     DateTime?
+  isCurrent   Boolean   @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([profileId])
+  @@map("work_experiences")
+}
+
+model Education {
+  id        String  @id @default(cuid())
+  profileId String
+  profile   Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  school       String
+  degree       String?
+  fieldOfStudy String?
+  startYear    Int?
+  endYear      Int?
+  description  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([profileId])
+  @@map("educations")
+}
+
+model Skill {
+  id   String @id @default(cuid())
+  name String @unique
+  slug String @unique
+
+  profiles ProfileSkill[]
+  jobs     JobSkill[]
+
+  @@map("skills")
+}
+
+model ProfileSkill {
+  profileId         String
+  profile           Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  skillId           String
+  skill             Skill   @relation(fields: [skillId], references: [id], onDelete: Cascade)
+  yearsOfExperience Int     @default(0)
+
+  @@id([profileId, skillId])
+  @@index([skillId])
+  @@map("profile_skills")
+}
+
+/// Drives the "Open to offers" control and the recommended-jobs ranking.
+model JobPreference {
+  id        String  @id @default(cuid())
+  profileId String  @unique
+  profile   Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  /// One of SEARCH_STATUSES: READY_TO_INTERVIEW | OPEN_TO_OFFERS | CLOSED
+  searchStatus String @default("OPEN_TO_OFFERS")
+
+  /// JSON string array of ROLE_TYPES, e.g. ["FULL_TIME","CONTRACT"].
+  desiredRoleTypes String @default("[\"FULL_TIME\"]")
+  /// JSON string array of role titles, e.g. ["Product Manager"].
+  desiredRoles     String @default("[]")
+  /// JSON string array of city names the candidate wants to work in.
+  desiredLocations String @default("[]")
+
+  openToRemote      Boolean @default(true)
+  willingToRelocate Boolean @default(false)
+
+  desiredSalaryMin Int?
+  currency         String @default("INR")
+
+  /// JSON string array of COMPANY_SIZES the candidate would join.
+  desiredCompanySizes String @default("[]")
+  /// One of WORK_AUTHORIZATIONS.
+  workAuthorization   String @default("NOT_SPECIFIED")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("job_preferences")
+}
+
+/// Backs Wellfound's "Culture" tab - soft preferences that colour the profile
+/// but never gate a search result.
+model CultureProfile {
+  id        String  @id @default(cuid())
+  profileId String  @unique
+  profile   Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  /// Surfaces as "Looking for" on the profile overview.
+  lookingFor String?
+  /// One of WORK_ENVIRONMENTS: OFFICE | REMOTE | HYBRID | NO_PREFERENCE
+  workEnvironment String @default("NO_PREFERENCE")
+  /// JSON string array of free-form priorities, e.g. ["Growth","Mentorship"].
+  importantFactors String @default("[]")
+
+  /// 1-5 Likert scores, matching the sliders on the real Culture tab.
+  remotePolicyImportance Int @default(3)
+  quietOfficeImportance  Int @default(3)
+
+  /// JSON string arrays of market/industry names.
+  marketsInterested String @default("[]")
+  marketsExcluded   String @default("[]")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("culture_profiles")
+}
+
+// ---------------------------------------------------------------------------
+// Companies & jobs
+// ---------------------------------------------------------------------------
+
+model Company {
+  id          String  @id @default(cuid())
+  name        String
+  slug        String  @unique
+  tagline     String?
+  description String?
+  /// Remote URL or generated avatar - no S3 in this clone.
+  logoUrl     String?
+  websiteUrl  String?
+  location    String?
+  /// One of COMPANY_SIZES, e.g. "11-50".
+  size        String?
+  /// One of FUNDING_STAGES, e.g. "SERIES_A".
+  fundingStage String?
+  industry    String?
+  foundedYear Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  jobs Job[]
+
+  @@map("companies")
+}
+
+model Job {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  title       String
+  slug        String  @unique
+  description String
+  /// Markdown-ish bullet list stored as JSON string array.
+  requirements String @default("[]")
+
+  /// One of ROLE_TYPES: FULL_TIME | PART_TIME | CONTRACT | INTERNSHIP | COFOUNDER
+  roleType String @default("FULL_TIME")
+  /// One of LOCATION_TYPES: REMOTE | ONSITE | HYBRID
+  locationType String @default("ONSITE")
+
+  salaryMin Int?
+  salaryMax Int?
+  currency  String @default("INR")
+  equityMin Float?
+  equityMax Float?
+
+  experienceMin Int @default(0)
+  experienceMax Int @default(10)
+
+  recruiterName  String?
+  recruiterTitle String?
+
+  applicantCount Int      @default(0)
+  isActive       Boolean  @default(true)
+  postedAt       DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  locations    JobLocation[]
+  skills       JobSkill[]
+  applications Application[]
+  savedBy      SavedJob[]
+  hiddenBy     HiddenJob[]
+
+  @@index([companyId])
+  @@index([roleType])
+  @@index([locationType])
+  @@index([postedAt])
+  @@map("jobs")
+}
+
+/// A job can be advertised in several cities; kept relational so location
+/// filtering stays a real query rather than a JSON scan.
+model JobLocation {
+  id    String @id @default(cuid())
+  jobId String
+  job   Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  city    String
+  country String @default("India")
+
+  @@index([jobId])
+  @@index([city])
+  @@map("job_locations")
+}
+
+model JobSkill {
+  jobId   String
+  job     Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  skillId String
+  skill   Skill  @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([jobId, skillId])
+  @@index([skillId])
+  @@map("job_skills")
+}
+
+// ---------------------------------------------------------------------------
+// Candidate <-> job interactions
+// ---------------------------------------------------------------------------
+
+model SavedJob {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobId  String
+  job    Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, jobId])
+  @@index([userId])
+  @@map("saved_jobs")
+}
+
+model HiddenJob {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobId  String
+  job    Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, jobId])
+  @@index([userId])
+  @@map("hidden_jobs")
+}
+
+model SavedSearch {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name String
+  /// Serialized JobSearchQuery - replayed verbatim against /jobs.
+  filters      String  @default("{}")
+  alertEnabled Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@map("saved_searches")
+}
+
+// ---------------------------------------------------------------------------
+// Applications ("Applied" section)
+// ---------------------------------------------------------------------------
+
+model Application {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobId  String
+  job    Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  /// One of APPLICATION_STATUSES:
+  /// APPLIED | IN_REVIEW | INTERVIEWING | OFFER | HIRED | REJECTED | WITHDRAWN
+  status String @default("APPLIED")
+
+  coverLetter    String?
+  resumeFileName String?
+  /// Free-text answer bundle, stored as a JSON string.
+  answers        String  @default("{}")
+
+  appliedAt   DateTime  @default(now())
+  withdrawnAt DateTime?
+  updatedAt   DateTime  @updatedAt
+
+  /// Wellfound expires applications after two weeks without activity. Stored
+  /// rather than derived so a recruiter reply can push the date out, and so the
+  /// Applied page can flag "expiring soon" without recomputing per render.
+  expiresAt DateTime?
+
+  events ApplicationEvent[]
+
+  @@unique([userId, jobId])
+  @@index([userId])
+  @@index([status])
+  @@map("applications")
+}
+
+/// Append-only timeline powering the status history on the Applied page.
+model ApplicationEvent {
+  id            String      @id @default(cuid())
+  applicationId String
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  status String
+  note   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([applicationId])
+  @@map("application_events")
+}
